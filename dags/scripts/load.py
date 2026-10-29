@@ -50,6 +50,80 @@ def _bulk_upsert_via_copy(conn, df: pd.DataFrame, target_table: str, conflict_co
         logger.info(f"[{target_table}] Procesadas {len(df):,} filas de forma idempotente.")
 
 
+SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS dim_date (
+    date_key INTEGER PRIMARY KEY,
+    full_date DATE NOT NULL UNIQUE,
+    year INTEGER NOT NULL,
+    quarter INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    month_name VARCHAR(20) NOT NULL,
+    day INTEGER NOT NULL,
+    day_of_week INTEGER NOT NULL,
+    is_weekend BOOLEAN NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dim_products (
+    stock_code VARCHAR(50) PRIMARY KEY,
+    canonical_description TEXT NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    supplier_country VARCHAR(100) DEFAULT 'United Kingdom',
+    is_active BOOLEAN DEFAULT TRUE,
+    raw_variation_count INTEGER DEFAULT 1,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS dim_customers (
+    customer_id VARCHAR(50) PRIMARY KEY,
+    is_identified BOOLEAN NOT NULL,
+    primary_country VARCHAR(100) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS fact_transactions (
+    transaction_sk BIGSERIAL PRIMARY KEY,
+    transaction_hash VARCHAR(64) NOT NULL UNIQUE,
+    invoice_no VARCHAR(50) NOT NULL,
+    stock_code VARCHAR(50) NOT NULL REFERENCES dim_products(stock_code),
+    customer_id VARCHAR(50) NOT NULL REFERENCES dim_customers(customer_id),
+    date_key INTEGER NOT NULL REFERENCES dim_date(date_key),
+    invoice_timestamp_utc TIMESTAMP WITH TIME ZONE NOT NULL,
+    country VARCHAR(100) NOT NULL,
+    transaction_type VARCHAR(20) NOT NULL CHECK (transaction_type IN ('SALE', 'RETURN')),
+    quantity INTEGER NOT NULL,
+    unit_price NUMERIC(12, 4) NOT NULL CHECK (unit_price > 0),
+    gross_amount NUMERIC(14, 4) NOT NULL,
+    source_file VARCHAR(50) NOT NULL,
+    loaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS fact_daily_product_metrics (
+    date_key INTEGER NOT NULL REFERENCES dim_date(date_key),
+    stock_code VARCHAR(50) NOT NULL REFERENCES dim_products(stock_code),
+    sales_count INTEGER NOT NULL DEFAULT 0,
+    returns_count INTEGER NOT NULL DEFAULT 0,
+    units_sold INTEGER NOT NULL DEFAULT 0,
+    units_returned INTEGER NOT NULL DEFAULT 0,
+    gross_revenue NUMERIC(14, 4) NOT NULL DEFAULT 0.00,
+    returns_amount NUMERIC(14, 4) NOT NULL DEFAULT 0.00,
+    net_revenue NUMERIC(14, 4) NOT NULL DEFAULT 0.00,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (date_key, stock_code)
+);
+CREATE TABLE IF NOT EXISTS audit_rejected_records (
+    reject_id BIGSERIAL PRIMARY KEY,
+    reject_hash VARCHAR(64) NOT NULL UNIQUE,
+    raw_invoice_no TEXT,
+    raw_stock_code TEXT,
+    raw_description TEXT,
+    raw_quantity TEXT,
+    raw_unit_price TEXT,
+    raw_invoice_date TEXT,
+    raw_customer_id TEXT,
+    raw_country TEXT,
+    rejection_reason VARCHAR(100) NOT NULL,
+    source_file VARCHAR(50) NOT NULL,
+    rejected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
 def load_star_schema_to_dw(staging_dir: str, conn_id: str = "postgres_dw"):
     """
     Tarea 4: Conecta al Data Warehouse mediante Airflow Connection y carga las 6 tablas del Modelo Estrella.
@@ -75,6 +149,9 @@ def load_star_schema_to_dw(staging_dir: str, conn_id: str = "postgres_dw"):
     # Ejecutar toda la carga dentro de una transacción atómica
     raw_conn = engine.raw_connection()
     try:
+        # Asegurar que las tablas existan siempre antes de insertar
+        with raw_conn.cursor() as cur:
+            cur.execute(SCHEMA_DDL)
         # 1. Dimensiones
         _bulk_upsert_via_copy(
             raw_conn, dim_date, "dim_date",
