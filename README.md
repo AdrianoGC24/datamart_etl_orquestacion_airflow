@@ -57,8 +57,8 @@ Enterprise data platform built for **DataMart S.A.S.** to ingest, clean, audit, 
 
 ### Step 1: Clone the Repository
 ```bash
-git clone <YOUR_REPOSITORY_URL>
-cd 2_modulo_v3
+git clone https://github.com/AdrianoGC24/datamart_etl_orquestacion_airflow.git
+cd datamart_etl_orquestacion_airflow
 ```
 
 ### Step 2: Verify Source Datasets
@@ -197,7 +197,7 @@ docker exec -i datamart_analytical_dw psql -U dw_admin -d datamart_dw < ./sql_va
 ## 7. Repository Structure
 
 ```text
-2_modulo_v3/
+datamart_etl_orquestacion_airflow/
 ├── .env.example              # Template for environment variables
 ├── .gitignore                # Excludes secrets, caches, and runtime logs
 ├── .dockerignore             # Optimizes Docker build context
