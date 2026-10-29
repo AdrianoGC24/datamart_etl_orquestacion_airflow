@@ -1,0 +1,12 @@
+FROM apache/airflow:3.1.5
+
+USER root
+# Copiamos el binario de uv para instalar dependencias a máxima velocidad
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+# Copiamos requirements e instalamos como ROOT para tener permisos en /usr/python
+COPY requirements.txt /requirements.txt
+RUN uv pip install --system --no-cache -r /requirements.txt
+
+# Cambiamos a usuario airflow al final para que los procesos corran seguros
+USER airflow

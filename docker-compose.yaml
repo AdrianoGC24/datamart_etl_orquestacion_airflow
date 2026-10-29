@@ -1,0 +1,152 @@
+---
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  image: datamart-airflow:3.1.5
+  env_file:
+    - ${ENV_FILE_PATH:-.env}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres/${AIRFLOW_DB_NAME:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Inyección nativa y sin demoras de Connections y Variables
+    AIRFLOW_CONN_POSTGRES_DW: ${AIRFLOW_CONN_POSTGRES_DW}
+    AIRFLOW_CONN_CATALOG_API: ${AIRFLOW_CONN_CATALOG_API}
+    AIRFLOW_VAR_DATA_SOURCES_DIR: ${AIRFLOW_VAR_DATA_SOURCES_DIR}
+    AIRFLOW_VAR_STAGING_DIR: ${AIRFLOW_VAR_STAGING_DIR}
+    AIRFLOW_VAR_BATCH_SIZE: ${AIRFLOW_VAR_BATCH_SIZE}
+    AIRFLOW_VAR_USE_CATALOG_API: ${AIRFLOW_VAR_USE_CATALOG_API}
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/data_sources:/opt/airflow/data_sources
+    - ${AIRFLOW_PROJ_DIR:-.}/sql_validations:/opt/airflow/sql_validations
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    warehouse-postgres:
+      condition: service_healthy
+
+services:
+  # 1. PostgreSQL 16 dedicado a los metadatos internos de Airflow
+  postgres:
+    image: postgres:16
+    container_name: datamart_airflow_metadata_db
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:-airflow}"]
+      interval: 5s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # 2. PostgreSQL 16 separado para el Data Warehouse Analítico de DataMart
+  warehouse-postgres:
+    image: postgres:16
+    container_name: datamart_analytical_dw
+    environment:
+      POSTGRES_USER: ${DW_USER:-dw_admin}
+      POSTGRES_PASSWORD: ${DW_PASSWORD:-dw_secure_password_2024}
+      POSTGRES_DB: ${DW_DB:-datamart_dw}
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "${DW_EXTERNAL_PORT:-5433}:5432"
+    volumes:
+      - dw-db-volume:/var/lib/postgresql/data
+      - ${AIRFLOW_PROJ_DIR:-.}/warehouse_init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DW_USER:-dw_admin}", "-d", "${DW_DB:-datamart_dw}"]
+      interval: 5s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # 3. API Server / Webserver de Airflow (http://localhost:8080)
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: datamart_airflow_apiserver
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 4. Scheduler de Airflow
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: datamart_airflow_scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 5. DAG Processor de Airflow
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: datamart_airflow_dag_processor
+    command: dag-processor
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 6. Triggerer de Airflow
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: datamart_airflow_triggerer
+    command: triggerer
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 7. Inicializador ultra-rápido (migra DB y crea usuario admin en 1 solo proceso)
+  airflow-init:
+    <<: *airflow-common
+    container_name: datamart_airflow_init
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+volumes:
+  postgres-db-volume:
+  dw-db-volume:
